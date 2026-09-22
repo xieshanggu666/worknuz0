@@ -47,6 +47,15 @@ await old.freshnessTickets.add({
   id: 'fr-old', docId: 'doc-old', round: 1, status: 'open', cycleDays: 30,
   dueAt: new Date().toISOString(), createdAt: new Date().toISOString(), timeline: []
 })
+// v9 老结构交接单：单一接任者 + 整单状态（无逐篇 toUserId/status/schemaVersion）
+const hoOld = {
+  id: 'ho-old', status: 'pending_approval', fromUserId: 'u1', toUserId: 'u2',
+  docIds: ['doc-old'], revokeMode: 'keep', note: '',
+  items: [{ docId: 'doc-old', title: '老文档', snapshot: { ownerId: 'u1', updatedAt: 't', activeReviewId: null, freshnessSig: '-' }, result: null }],
+  createdAt: new Date().toISOString(), confirmedAt: new Date().toISOString(),
+  decidedBy: null, decidedAt: null, decideNote: '', completedAt: null, failReason: '', timeline: []
+}
+await old.handovers.add(hoOld)
 await old.close()
 
 // ---- 2. 用当前 schema（v9）打开：升级迁移应自动执行 ----
@@ -58,6 +67,13 @@ const d = await mig.docs.get('doc-old')
 assert(d.freshness.source === 'doc' && d.freshness.policyId === null, '老库逐篇配置迁移为文档级覆盖')
 const t = await mig.freshnessTickets.get('fr-old')
 assert(t.ruleSource === 'doc' && t.policyId === null, '老库复核单补规则来源快照')
+
+// v10：旧「单一接任者/整单状态」交接单升级为逐篇结构
+const hoMigrated = await mig.handovers.get('ho-old')
+assert(hoMigrated.schemaVersion === 10, 'v10 交接单迁移：标记 schemaVersion=10')
+assert(hoMigrated.items[0].toUserId === 'u2' && hoMigrated.items[0].status === 'pending_approval', 'v10：整单状态展开到逐篇条目（接任者/状态继承）')
+assert(hoMigrated.items[0].confirmedAt === hoOld.confirmedAt, 'v10：条目承接确认时间')
+assert(hoMigrated.status === 'pending_approval', 'v10：批次状态按条目重新汇总')
 await mig.close()
 
 // ---- 3. 全新安装：种子跑到 v7，分类策略演示数据就位 ----

@@ -243,7 +243,7 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
         <span>🔑 你正以「{{ accessPermLabel(activeGrant.grant.permission) }}」授权访问本文档，{{ grantExpireText(activeGrant) }}；到期或被撤销后访问权限将自动收回。</span>
       </div>
       <div v-if="activeHandover" class="card handover-banner">
-        <span>🤝 本文档正在责任交接中（{{ userById[activeHandover.fromUserId]?.name }} → {{ userById[activeHandover.toUserId]?.name }}）：{{ activeHandover.status === 'pending_confirm' ? '等待接任者确认' : '等待管理员批准' }}，期间请避免修改，否则批准时将因并发变更校验失败而整体回退。</span>
+        <span>🤝 本文档正在责任交接中（{{ userById[activeHandover.fromUserId]?.name }} → {{ userById[activeHandover.item.toUserId]?.name }}）：{{ activeHandover.item.status === 'pending_confirm' ? '等待接任者确认' : '接任者已确认，等待管理员分批批准' }}，期间请避免修改，否则批准时将因并发变更校验失败而对本文档回退。</span>
       </div>
       <div v-if="activeRetirement" class="card retire-banner">
         <span>🗄 本文档已退役（{{ userById[activeRetirement.initiatedBy]?.name || activeRetirement.approvedBy }} 发起，{{ userById[activeRetirement.approvedBy] }} 批准）：已停止搜索与问答引用，正文只读保留。</span>

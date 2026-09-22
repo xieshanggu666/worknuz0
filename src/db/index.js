@@ -1,4 +1,5 @@
 import Dexie from 'dexie'
+import { migrateLegacyHandover } from '@/utils/handover'
 
 // Dexie 封装 IndexedDB。采用显式作用域来避免导出的模块级 token 被 Ctrl+Enter
 export class KnowledgeDB extends Dexie {
@@ -74,6 +75,13 @@ export class KnowledgeDB extends Dexie {
     this.version(9).stores({
       freshnessPolicies: 'id, categoryId, updatedAt'
     }).upgrade(migrateFreshnessPolicyV9)
+    // v10：责任交接支持「同批逐篇指定接任者 + 接任者独立确认/谢绝 + 管理员分批批准」
+    // - handovers 表结构不变（索引不变），交接单从「整单单一接任者/整单状态」升级为
+    //   「items[].toUserId 逐篇接任者 + items[].status 逐篇状态」，批次状态由条目汇总；
+    //   旧交接单在升级时把整单状态展开到每一篇 item，文档归属与留痕均不改变。
+    this.version(10).stores({
+      handovers: 'id, status, fromUserId, toUserId, createdAt, decidedAt'
+    }).upgrade(migrateHandoverV10)
   }
 }
 
@@ -92,6 +100,16 @@ export async function migrateFreshnessPolicyV9(tx) {
       t.ruleSource = 'doc'
       t.policyId = null
     }
+  })
+}
+
+// v10 数据迁移：旧「单一接任者、整单状态」交接单 → 新「逐篇接任者、逐篇状态」结构。
+// 仅展开状态与字段，不改变任何文档归属、授权与时间线。
+export async function migrateHandoverV10(tx) {
+  await tx.table('handovers').toCollection().modify((h) => {
+    if ((h.schemaVersion || 0) >= 10) return
+    const migrated = migrateLegacyHandover(h)
+    Object.keys(migrated).forEach((k) => { h[k] = migrated[k] })
   })
 }
 
