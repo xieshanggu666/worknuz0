@@ -160,8 +160,8 @@ const userById = computed(() => Object.fromEntries(auth.users.map((u) => [u.id, 
 const reviewLocked = computed(() => !!pendingReview.value && auth.user?.role !== 'admin')
 // 拥有者视角：管理本文档的访问申请
 const isOwnerOrAdmin = computed(() => doc.value && (auth.user?.role === 'admin' || doc.value.ownerId === auth.user?.id))
-// 责任交接：本文档存在流转中的交接单时提示（交接期间修改将导致批准时校验失败、整体回退）
-const activeHandover = computed(() => (doc.value ? handoverStore.activeHandoverOfDoc(doc.value.id) : null))
+// 责任交接：本文档存在流转中的交接篇时提示（交接期间修改将导致批准时校验失败、该篇回退）
+const activeHandover = computed(() => (doc.value ? handoverStore.activeItemOfDoc(doc.value.id) : null))
 // 知识退役：本文档当前生效退役（已退役则只读，停止搜索/问答，引导至替代文档）
 const activeRetirement = computed(() => (doc.value ? retirementStore.activeRetirementOfDoc(doc.value.id) : null))
 
@@ -243,7 +243,7 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
         <span>🔑 你正以「{{ accessPermLabel(activeGrant.grant.permission) }}」授权访问本文档，{{ grantExpireText(activeGrant) }}；到期或被撤销后访问权限将自动收回。</span>
       </div>
       <div v-if="activeHandover" class="card handover-banner">
-        <span>🤝 本文档正在责任交接中（{{ userById[activeHandover.fromUserId]?.name }} → {{ userById[activeHandover.toUserId]?.name }}）：{{ activeHandover.status === 'pending_confirm' ? '等待接任者确认' : '等待管理员批准' }}，期间请避免修改，否则批准时将因并发变更校验失败而整体回退。</span>
+        <span>🤝 本文档正在责任交接中（{{ userById[activeHandover.handover.fromUserId]?.name }} → {{ userById[activeHandover.item.toUserId]?.name }}）：{{ activeHandover.item.status === 'pending_confirm' ? '等待接任者确认' : '等待管理员批准' }}，期间请避免修改，否则批准时将因并发变更校验失败而回退该篇。</span>
       </div>
       <div v-if="activeRetirement" class="card retire-banner">
         <span>🗄 本文档已退役（{{ userById[activeRetirement.initiatedBy]?.name || activeRetirement.approvedBy }} 发起，{{ userById[activeRetirement.approvedBy] }} 批准）：已停止搜索与问答引用，正文只读保留。</span>

@@ -652,13 +652,14 @@ async function ensureFreshnessSeed() {
 }
 
 // ---- 责任交接演示（v6 增量种子）----
-// ho-1 待接任者确认：陈思涵把 doc-1（评审中）与 doc-2 批量交接给王子薇（保留协作权限）。
+// ho-1 流转中（逐篇接任者）：陈思涵同一批交接 doc-1 与 doc-2——doc-1 指定王子薇（待确认）、
+//   doc-2 指定高晓叶（已确认待批准）；各接任者独立确认，管理员可按确认结果分批批准。
 //   快照取自发起时刻——若先在评审中心处理了 rev-1 或编辑了这两篇文档，批准时将因并发
-//   变更校验失败而整体回退，可直接演示交接期间的并发保护。
+//   变更校验失败而回退对应篇，可直接演示交接期间的并发保护。
 // ho-2 已完成：林致远把 doc-5（新成员入职指引，含保鲜责任）交接给陈思涵并收回自身协作权限，
 //   doc-5 保留历史归属（ownerHistory），可对照「历任负责人」展示。
 // ho-3 已失败回退：陈思涵早前交接 doc-2 给王子薇，流转期间王子薇的恢复评审 rev-5 通过、
-//   文档内容更新，管理员批准时校验不一致，整体回退未产生任何转移（随后重新发起为 ho-1）。
+//   文档内容更新，管理员批准时校验不一致，该篇回退未产生任何转移（随后重新发起为 ho-1）。
 async function ensureHandoverSeed() {
   if ((await db.handovers.count()) > 0) return
 
@@ -673,40 +674,46 @@ async function ensureHandoverSeed() {
       ? [d.freshness.cycleDays, d.freshness.nextDueAt, d.freshness.round, d.freshness.activeTicket || ''].join('|')
       : '-'
   })
+  const itemOf = (doc, toUserId, status, extra = {}) => ({
+    docId: doc.id, title: doc.title, toUserId, status, snapshot: snapOf(doc),
+    confirmedAt: null, decidedBy: null, decidedAt: null, decideNote: '',
+    completedAt: null, failReason: '', result: null,
+    ...extra
+  })
   const handovers = []
   if (doc1 && doc2) {
     handovers.push({
       id: 'ho-1', status: 'pending_confirm',
-      fromUserId: 'u-chen', toUserId: 'u-ziwei',
+      fromUserId: 'u-chen',
       docIds: ['doc-1', 'doc-2'], revokeMode: 'keep',
-      note: '轮岗调整，开发规范与数据库两篇文档先交接给子薇，确认后请管理员批准。',
+      note: '轮岗调整：开发规范交接给子薇、数据库指南交接给晓叶，各自确认后请管理员分批批准。',
       items: [
-        { docId: 'doc-1', title: doc1.title, snapshot: snapOf(doc1), result: null },
-        { docId: 'doc-2', title: doc2.title, snapshot: snapOf(doc2), result: null }
+        itemOf(doc1, 'u-ziwei', 'pending_confirm'),
+        itemOf(doc2, 'u-xiaoye', 'confirmed', { confirmedAt: ago(1 * h) })
       ],
-      createdAt: ago(3 * h), confirmedAt: null,
-      decidedBy: null, decidedAt: null, decideNote: '',
-      completedAt: null, failReason: '',
+      createdAt: ago(3 * h),
       timeline: [
-        { action: 'initiate', by: 'u-chen', at: ago(3 * h), note: '轮岗调整，开发规范与数据库两篇文档先交接给子薇，确认后请管理员批准。' }
+        { action: 'initiate', by: 'u-chen', at: ago(3 * h), note: '轮岗调整：开发规范交接给子薇、数据库指南交接给晓叶，各自确认后请管理员分批批准。' },
+        { action: 'confirm', by: 'u-xiaoye', at: ago(1 * h), note: '《' + doc2.title + '》' }
       ]
     })
     handovers.push({
       id: 'ho-3', status: 'failed',
-      fromUserId: 'u-chen', toUserId: 'u-ziwei',
+      fromUserId: 'u-chen',
       docIds: ['doc-2'], revokeMode: 'keep',
       note: 'Dexie 指南交接给子薇维护。',
       items: [
-        { docId: 'doc-2', title: doc2.title, snapshot: { ownerId: 'u-chen', updatedAt: ago(2 * d), activeReviewId: null, freshnessSig: '-' }, result: null }
+        itemOf(doc2, 'u-ziwei', 'failed', {
+          snapshot: { ownerId: 'u-chen', updatedAt: ago(2 * d), activeReviewId: null, freshnessSig: '-' },
+          confirmedAt: ago(30 * h), decidedBy: 'u-admin', decidedAt: ago(1 * d),
+          failReason: '交接期间文档发生并发变更：内容已更新。该篇未执行任何转移，请确认后重新发起。'
+        })
       ],
-      createdAt: ago(2 * d), confirmedAt: ago(30 * h),
-      decidedBy: 'u-admin', decidedAt: ago(1 * d), decideNote: '',
-      completedAt: null,
-      failReason: '交接期间文档发生并发变更：《Dexie 数据库操作指南》内容已更新。本次交接未执行任何转移，请确认后重新发起。',
+      createdAt: ago(2 * d),
       timeline: [
         { action: 'initiate', by: 'u-chen', at: ago(2 * d), note: 'Dexie 指南交接给子薇维护。' },
-        { action: 'confirm', by: 'u-ziwei', at: ago(30 * h), note: '' },
-        { action: 'fail', by: 'u-admin', at: ago(1 * d), note: '交接期间文档发生并发变更：《Dexie 数据库操作指南》内容已更新。本次交接未执行任何转移，请确认后重新发起。' }
+        { action: 'confirm', by: 'u-ziwei', at: ago(30 * h), note: '《' + doc2.title + '》' },
+        { action: 'fail', by: 'u-admin', at: ago(1 * d), note: '《' + doc2.title + '》交接期间文档发生并发变更：内容已更新。该篇未执行任何转移，请确认后重新发起。' }
       ]
     })
   }
@@ -717,23 +724,22 @@ async function ensureHandoverSeed() {
     const completedAt = ago(5 * d)
     handovers.push({
       id: 'ho-2', status: 'completed',
-      fromUserId: 'u-admin', toUserId: 'u-chen',
+      fromUserId: 'u-admin',
       docIds: ['doc-5'], revokeMode: 'revoke',
       note: '入职指引后续由思涵长期维护，我的协作权限一并收回。',
       items: [
-        {
-          docId: 'doc-5', title: doc5.title,
+        itemOf(doc5, 'u-chen', 'completed', {
           snapshot: { ownerId: 'u-admin', updatedAt: ago(10 * d), activeReviewId: null, freshnessSig: ['365', ago(-355 * d), 1, ''].join('|') },
+          confirmedAt: ago(6 * d - 2 * h), decidedBy: 'u-admin', decidedAt: completedAt,
+          decideNote: '同意交接，保鲜复核责任一并转移。', completedAt,
           result: { reviewIds: [], freshTicketId: null, accessPending: 0, revokedGrants: 0 }
-        }
+        })
       ],
-      createdAt: ago(6 * d), confirmedAt: ago(6 * d - 2 * h),
-      decidedBy: 'u-admin', decidedAt: completedAt, decideNote: '同意交接，保鲜复核责任一并转移。',
-      completedAt, failReason: '',
+      createdAt: ago(6 * d),
       timeline: [
         { action: 'initiate', by: 'u-admin', at: ago(6 * d), note: '入职指引后续由思涵长期维护，我的协作权限一并收回。' },
-        { action: 'confirm', by: 'u-chen', at: ago(6 * d - 2 * h), note: '' },
-        { action: 'approve', by: 'u-admin', at: completedAt, note: '同意交接，保鲜复核责任一并转移。' }
+        { action: 'confirm', by: 'u-chen', at: ago(6 * d - 2 * h), note: '《' + doc5.title + '》' },
+        { action: 'approve', by: 'u-admin', at: completedAt, note: '《' + doc5.title + '》：同意交接，保鲜复核责任一并转移。' }
       ]
     })
     // 应用 ho-2 的转移结果：所有权 + 历史归属 + 按交接决定收回原负责人协作权限

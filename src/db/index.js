@@ -74,6 +74,14 @@ export class KnowledgeDB extends Dexie {
     this.version(9).stores({
       freshnessPolicies: 'id, categoryId, updatedAt'
     }).upgrade(migrateFreshnessPolicyV9)
+    // v10：交接逐篇接任者
+    // - handovers.items 逐篇携带 toUserId 与独立状态机：同一批交接可逐篇指定不同接任者，
+    //   各接任者按篇独立确认/谢绝，管理员按确认结果分批批准（已确认篇先批先转）；
+    //   批次整体状态由篇状态派生。旧交接单按整体状态映射到每一篇，接任者取单级 toUserId，
+    //   单级确认/审批时间戳与备注同步到篇。
+    this.version(10).stores({
+      handovers: 'id, status, fromUserId, toUserId, createdAt, decidedAt'
+    }).upgrade(migrateHandoverItemsV10)
   }
 }
 
@@ -91,6 +99,38 @@ export async function migrateFreshnessPolicyV9(tx) {
     if (t.ruleSource !== 'policy' && t.ruleSource !== 'doc') {
       t.ruleSource = 'doc'
       t.policyId = null
+    }
+  })
+}
+
+// v10 数据迁移（导出供升级与回归测试共用）：
+// 旧交接单为「整单一个接任者、整单流转」，items 无独立状态；逐篇补 toUserId（取单级）与
+// 按单状态映射的篇状态，单级确认/审批时间戳与备注同步到篇。升级前后语义一致——
+// 已终态的单其每一篇同为对应终态，待批准的单每一篇视为已确认待批准。
+export async function migrateHandoverItemsV10(tx) {
+  const itemStatusOf = {
+    pending_confirm: 'pending_confirm',
+    pending_approval: 'confirmed',
+    completed: 'completed',
+    declined: 'declined',
+    rejected: 'rejected',
+    cancelled: 'cancelled',
+    failed: 'failed'
+  }
+  await tx.table('handovers').toCollection().modify((h) => {
+    if (!Array.isArray(h.items)) return
+    const st = itemStatusOf[h.status] || 'pending_confirm'
+    for (const it of h.items) {
+      if (it.status) continue // 已是逐篇新格式
+      it.toUserId = it.toUserId || h.toUserId || null
+      it.status = st
+      it.confirmedAt = h.confirmedAt || null
+      it.decidedBy = h.decidedBy || null
+      it.decidedAt = h.decidedAt || null
+      it.decideNote = h.decideNote || ''
+      it.completedAt = h.completedAt || null
+      it.failReason = h.failReason || ''
+      if (it.result === undefined) it.result = null
     }
   })
 }

@@ -120,13 +120,13 @@ await db.reviews.where('docId').equals(dReview.id).delete()
 await db.docs.update(dReview.id, { publishState: PUBLISH.PUBLISHED, activeReviewId: null })
 
 const dHo = await mkDoc()
-r = await handover.initiateHandover({ docIds: [dHo.id], toUserId: other.id, revokeMode: 'keep', note: '' }, owner)
+r = await handover.initiateHandover({ items: [{ docId: dHo.id, toUserId: other.id }], revokeMode: 'keep', note: '' }, owner)
 assert(r.status === 'ok', '前置：交接发起成功')
 r = await retirement.initiateRetirement({ docId: dHo.id, replacementDocId: rep1.id }, owner)
 assert(r.status === 'in-handover', '交接中的文档不可发起退役')
 
 // 交接事务不接受已退役/退役流转中文档
-r = await handover.initiateHandover({ docIds: [d1.id], toUserId: other.id, revokeMode: 'keep', note: '' }, owner)
+r = await handover.initiateHandover({ items: [{ docId: d1.id, toUserId: other.id }], revokeMode: 'keep', note: '' }, owner)
 assert(r.status === 'in-retirement', '存在流转中退役单的文档不可发起交接')
 
 // ---------- 2. 驳回与审批前撤销 ----------

@@ -7,8 +7,9 @@ import { useHandoverStore } from '@/stores/handover'
 import DocPill from '@/components/common/DocPill.vue'
 import { formatDate, formatFull, avatarColor } from '@/utils/format'
 import {
-  HANDOVER, REVOKE_MODE, handoverStatusLabel, handoverStatusCls, revokeModeLabel,
-  canConfirmHandover, canDecideHandover, canCancelHandover, handoverTimelineLabel
+  HANDOVER, REVOKE_MODE, handoverStatusLabel, handoverStatusCls, handoverItemLabel, handoverItemCls,
+  revokeModeLabel, pendingItemsFor, confirmedItemsOf,
+  canConfirmItem, canDecideItem, canDecideHandover, canCancelHandover, handoverTimelineLabel
 } from '@/utils/handover'
 
 const router = useRouter()
@@ -20,10 +21,11 @@ const tab = ref('confirm') // confirm | approve | mine | all
 const busyId = ref('')
 const noteMap = ref({})
 
-// ---- 发起批量交接 ----
+// ---- 发起批量交接（同一批逐篇指定接任者） ----
 const creating = ref(false)
 const picked = ref([]) // 选中的文档 id
-const toUserId = ref('')
+const targetMap = ref({}) // docId → 接任者 id（逐篇指定）
+const bulkTarget = ref('') // 「统一指定」下拉，便于一次设全部
 const revokeMode = ref(REVOKE_MODE.KEEP)
 const note = ref('')
 const initiateBusy = ref(false)
@@ -39,6 +41,8 @@ const ownDocs = computed(() =>
     .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
 )
 const successors = computed(() => auth.users.filter((u) => u.id !== auth.user?.id))
+// 每篇都已指定接任者才可提交
+const allTargeted = computed(() => picked.value.length > 0 && picked.value.every((id) => !!targetMap.value[id]))
 
 const confirmList = computed(() => handoverStore.pendingConfirmFor(auth.user?.id))
 const approveList = computed(() => handoverStore.pendingApprovalFor(auth.user?.role))
@@ -59,16 +63,38 @@ const counts = computed(() => ({
   all: allList.value.length
 }))
 
+// 批次内的接任者去重（头部展示）
+const successorIds = (h) => [...new Set((h.items || []).map((i) => i.toUserId).filter(Boolean))]
+// 我在该批次中待确认的篇 / 该批次已确认待批准的篇
+const myPending = (h) => pendingItemsFor(h, auth.user?.id)
+const confirmedItems = (h) => confirmedItemsOf(h)
+
 function togglePick(id) {
   const i = picked.value.indexOf(id)
   if (i >= 0) picked.value.splice(i, 1)
-  else picked.value.push(id)
+  else {
+    picked.value.push(id)
+    // 新勾选的篇默认沿用「统一指定」或第一位可选接任者，可再逐篇调整
+    if (!targetMap.value[id]) targetMap.value[id] = bulkTarget.value || successors.value[0]?.id || ''
+  }
+}
+
+function setTarget(id, uid) {
+  targetMap.value = { ...targetMap.value, [id]: uid }
+}
+
+function applyBulk() {
+  if (!bulkTarget.value) return
+  const m = { ...targetMap.value }
+  for (const id of picked.value) m[id] = bulkTarget.value
+  targetMap.value = m
 }
 
 function openCreate() {
   creating.value = true
   picked.value = []
-  toUserId.value = successors.value[0]?.id || ''
+  targetMap.value = {}
+  bulkTarget.value = successors.value[0]?.id || ''
   revokeMode.value = REVOKE_MODE.KEEP
   note.value = ''
 }
@@ -76,11 +102,15 @@ function openCreate() {
 async function submitInitiate() {
   if (initiateBusy.value) return
   if (!picked.value.length) { alert('请至少选择一篇要交接的文档'); return }
-  if (!toUserId.value) { alert('请选择接任者'); return }
+  if (!allTargeted.value) { alert('请为每一篇文档指定接任者'); return }
   initiateBusy.value = true
   try {
     const res = await handoverStore.initiateHandover(
-      { docIds: [...picked.value], toUserId: toUserId.value, revokeMode: revokeMode.value, note: note.value.trim() },
+      {
+        items: picked.value.map((id) => ({ docId: id, toUserId: targetMap.value[id] })),
+        revokeMode: revokeMode.value,
+        note: note.value.trim()
+      },
       auth.user
     )
     if (res.status === 'ok') {
@@ -90,8 +120,12 @@ async function submitInitiate() {
       alert('发起失败：《' + (res.title || res.docId) + '》的负责人不是你，无法交接。')
     } else if (res.status === 'in-handover') {
       alert('发起失败：《' + (res.title || res.docId) + '》已有流转中的交接单，请先完成或取消。')
+    } else if (res.status === 'retired') {
+      alert('发起失败：《' + (res.title || res.docId) + '》已退役，不再参与责任交接。')
+    } else if (res.status === 'in-retirement') {
+      alert('发起失败：《' + (res.title || res.docId) + '》有流转中的退役申请，请先完成或取消。')
     } else if (res.status === 'bad-target') {
-      alert('发起失败：接任者无效。')
+      alert('发起失败：存在未指定或无效的接任者。')
     } else if (res.status === 'guest') {
       alert('请先登录后再发起交接。')
     } else {
@@ -102,35 +136,37 @@ async function submitInitiate() {
   }
 }
 
-async function confirm(h) {
+// 接任者确认（docIds 可一次多篇：逐篇确认或「全部确认」）
+async function confirm(h, docIds) {
   if (busyId.value) return
   busyId.value = h.id
   try {
-    const res = await handoverStore.confirmHandover(h.id, auth.user)
+    const res = await handoverStore.confirmHandover(h.id, docIds, auth.user)
     if (res.status !== 'ok') alert('操作失败：交接单状态已变化')
   } finally {
     busyId.value = ''
   }
 }
 
-async function decline(h) {
+async function decline(h, item) {
   if (busyId.value) return
   busyId.value = h.id
   try {
-    const res = await handoverStore.declineHandover(h.id, (noteMap.value[h.id] || '').trim(), auth.user)
+    const res = await handoverStore.declineHandover(h.id, item.docId, (noteMap.value[h.id] || '').trim(), auth.user)
     if (res.status !== 'ok') alert('操作失败：交接单状态已变化')
   } finally {
     busyId.value = ''
   }
 }
 
-async function decide(h, decision) {
+// 管理员分批批准/驳回（docIds 为本批范围：逐篇或「全部已确认」）
+async function decide(h, docIds, decision) {
   if (busyId.value) return
   busyId.value = h.id
   try {
-    const res = await handoverStore.decideHandover(h.id, decision, (noteMap.value[h.id] || '').trim(), auth.user)
-    if (res.status === 'changed' && res.conflicts) {
-      alert('交接未执行：' + res.handover.failReason)
+    const res = await handoverStore.decideHandover(h.id, docIds, decision, (noteMap.value[h.id] || '').trim(), auth.user)
+    if (res.status === 'ok' && res.failures?.length) {
+      alert('部分篇目未执行转移：' + res.failures.map((f) => '《' + f.title + '》' + f.fields.join('、')).join('；'))
     } else if (res.status !== 'ok') {
       alert('操作失败：交接单状态已变化')
     }
@@ -140,12 +176,12 @@ async function decide(h, decision) {
 }
 
 async function cancel(h) {
-  if (!confirm('确定取消本次交接？取消后文档保持原状。')) return
+  if (!confirm('确定取消本次交接？流转中的篇目将一并取消，文档保持原状。')) return
   const res = await handoverStore.cancelHandover(h.id, auth.user)
   if (res.status !== 'ok') alert('操作失败：交接单状态已变化')
 }
 
-// 逐篇转移结果摘要（已完成交接单）
+// 逐篇转移结果摘要（已完成篇）
 function itemResultText(item) {
   const r = item.result
   if (!r) return ''
@@ -172,8 +208,9 @@ onMounted(async () => {
     <header class="head">
       <h2>🤝 责任交接</h2>
       <p class="sub">
-        负责人可勾选名下文档批量发起交接：接任者确认、管理员批准后，统一转移文档所有权、待办审批与保鲜责任；
-        交接期间校验并发变更，任一文档不一致即整体失败回退，历史归属全程保留，原负责人权限按交接决定保留或收回。
+        负责人勾选名下文档批量发起交接，同一批中可逐篇指定不同接任者；各接任者独立确认或谢绝，
+        管理员按确认结果分批批准——已确认篇先批先转，文档所有权、待办审批与保鲜责任随批准一并转移；
+        交接期间校验并发变更，不一致的篇目失败回退，历史归属全程保留，原负责人权限按交接决定保留或收回。
       </p>
       <div class="head-row">
         <div class="tabs">
@@ -189,42 +226,55 @@ onMounted(async () => {
     <!-- 发起批量交接 -->
     <div v-if="creating" class="create card">
       <div class="c-title">📦 发起批量交接</div>
-      <div class="c-hint">仅可勾选你负责的文档；交接流转期间请避免修改这些文档，否则批准时将因并发变更校验失败而整体回退。</div>
+      <div class="c-hint">仅可勾选你负责的文档；同一批可逐篇指定不同接任者，各接任者独立确认后由管理员分批批准。交接流转期间请避免修改这些文档，否则批准时将因并发变更校验失败而回退该篇。</div>
       <div v-if="!ownDocs.length" class="c-empty">你名下暂无可交接的文档</div>
-      <div v-else class="doc-pick">
-        <label v-for="d in ownDocs" :key="d.id" class="dp" :class="{ disabled: handoverStore.activeHandoverOfDoc(d.id) }">
-          <input
-            type="checkbox"
-            :checked="picked.includes(d.id)"
-            :disabled="!!handoverStore.activeHandoverOfDoc(d.id)"
-            @change="togglePick(d.id)"
-          />
-          <span class="dp-title">{{ d.title }}</span>
-          <span v-if="handoverStore.activeHandoverOfDoc(d.id)" class="dp-tag">交接流转中</span>
-        </label>
-      </div>
-      <div class="c-form">
-        <label class="f-item">
-          <span class="f-k">接任者</span>
-          <select v-model="toUserId" class="f-sel">
-            <option v-for="u in successors" :key="u.id" :value="u.id">{{ u.name }}（{{ u.title || u.role }}）</option>
-          </select>
-        </label>
-        <label class="f-item">
-          <span class="f-k">原负责人权限</span>
-          <span class="f-radios">
-            <label><input type="radio" value="keep" v-model="revokeMode" /> 保留协作权限</label>
-            <label><input type="radio" value="revoke" v-model="revokeMode" /> 收回全部权限</label>
-          </span>
-        </label>
-        <input v-model="note" class="f-note" placeholder="交接说明（可选，将写入交接记录）" />
-      </div>
-      <div class="c-acts">
-        <button class="btn ghost" @click="creating = false">取消</button>
-        <button class="btn primary" :disabled="initiateBusy || !picked.length || !toUserId" @click="submitInitiate">
-          {{ initiateBusy ? '提交中…' : '提交交接（已选 ' + picked.length + ' 篇）' }}
-        </button>
-      </div>
+      <template v-else>
+        <div class="doc-pick">
+          <label v-for="d in ownDocs" :key="d.id" class="dp" :class="{ disabled: handoverStore.activeHandoverOfDoc(d.id) }">
+            <input
+              type="checkbox"
+              :checked="picked.includes(d.id)"
+              :disabled="!!handoverStore.activeHandoverOfDoc(d.id)"
+              @change="togglePick(d.id)"
+            />
+            <span class="dp-title">{{ d.title }}</span>
+            <span v-if="handoverStore.activeHandoverOfDoc(d.id)" class="dp-tag">交接流转中</span>
+            <select
+              v-else-if="picked.includes(d.id)"
+              class="dp-sel"
+              :value="targetMap[d.id]"
+              @click.stop
+              @change="setTarget(d.id, $event.target.value)"
+            >
+              <option value="" disabled>选择接任者</option>
+              <option v-for="u in successors" :key="u.id" :value="u.id">{{ u.name }}（{{ u.title || u.role }}）</option>
+            </select>
+          </label>
+        </div>
+        <div class="c-form">
+          <label class="f-item">
+            <span class="f-k">统一指定</span>
+            <select v-model="bulkTarget" class="f-sel">
+              <option v-for="u in successors" :key="u.id" :value="u.id">{{ u.name }}（{{ u.title || u.role }}）</option>
+            </select>
+            <button class="btn sm ghost" :disabled="!picked.length" @click="applyBulk">全部设为该成员</button>
+          </label>
+          <label class="f-item">
+            <span class="f-k">原负责人权限</span>
+            <span class="f-radios">
+              <label><input type="radio" value="keep" v-model="revokeMode" /> 保留协作权限</label>
+              <label><input type="radio" value="revoke" v-model="revokeMode" /> 收回全部权限</label>
+            </span>
+          </label>
+          <input v-model="note" class="f-note" placeholder="交接说明（可选，将写入交接记录）" />
+        </div>
+        <div class="c-acts">
+          <button class="btn ghost" @click="creating = false">取消</button>
+          <button class="btn primary" :disabled="initiateBusy || !allTargeted" @click="submitInitiate">
+            {{ initiateBusy ? '提交中…' : '提交交接（已选 ' + picked.length + ' 篇）' }}
+          </button>
+        </div>
+      </template>
     </div>
 
     <div v-if="!list.length" class="empty card">
@@ -240,8 +290,10 @@ onMounted(async () => {
               <span class="ava" :style="{ background: avatarColor(h.fromUserId) }">{{ userById[h.fromUserId]?.avatar || '?' }}</span>
               {{ userName(h.fromUserId) }}
               <span class="arrow">→</span>
-              <span class="ava" :style="{ background: avatarColor(h.toUserId) }">{{ userById[h.toUserId]?.avatar || '?' }}</span>
-              {{ userName(h.toUserId) }}
+              <span v-for="(uid, i) in successorIds(h)" :key="uid" class="ho-succ">
+                <span class="ava" :style="{ background: avatarColor(uid) }">{{ userById[uid]?.avatar || '?' }}</span>
+                {{ userName(uid) }}<span v-if="i < successorIds(h).length - 1">、</span>
+              </span>
             </span>
             <span class="ho-count">{{ h.docIds.length }} 篇文档</span>
           </div>
@@ -257,37 +309,50 @@ onMounted(async () => {
               <span class="hd-title" @click="docById[item.docId] && router.push('/docs/' + item.docId)">
                 {{ docById[item.docId]?.title || item.title }}
               </span>
+              <span class="hd-to">
+                →
+                <span class="ava" :style="{ background: avatarColor(item.toUserId) }">{{ userById[item.toUserId]?.avatar || '?' }}</span>
+                {{ userName(item.toUserId) }}
+              </span>
+              <span class="st" :class="handoverItemCls(item.status)">{{ handoverItemLabel(item.status) }}</span>
               <DocPill v-if="docById[item.docId]" :doc="docById[item.docId]" />
             </div>
             <div v-if="item.result" class="hd-result">✅ {{ itemResultText(item) }}</div>
+            <div v-if="item.status === HANDOVER.FAILED && item.failReason" class="hd-fail">⚠ {{ item.failReason }}</div>
+            <div v-else-if="item.decideNote" class="hd-note">“{{ item.decideNote }}”</div>
+            <!-- 接任者：按篇确认 / 谢绝 -->
+            <div v-if="canConfirmItem(item, auth.user?.id)" class="hd-acts">
+              <button class="btn sm" :disabled="busyId === h.id" @click="decline(h, item)">✕ 谢绝</button>
+              <button class="btn sm ok-solid" :disabled="busyId === h.id" @click="confirm(h, [item.docId])">✓ 确认接收</button>
+            </div>
+            <!-- 管理员：按篇批准 / 驳回 -->
+            <div v-if="canDecideItem(item, auth.user?.id, auth.user?.role)" class="hd-acts">
+              <button class="btn sm" :disabled="busyId === h.id" @click="decide(h, [item.docId], 'reject')">✕ 驳回</button>
+              <button class="btn sm ok-solid" :disabled="busyId === h.id" @click="decide(h, [item.docId], 'approve')">✓ 批准转移</button>
+            </div>
           </div>
         </div>
 
         <div class="ho-info">
           <span class="dim">{{ revokeModeLabel(h.revokeMode) }}</span>
-          <span v-if="h.confirmedAt" class="dim">{{ userName(h.toUserId) }} 于 {{ formatDate(h.confirmedAt) }} 确认</span>
-          <span v-if="h.decidedAt" class="dim">{{ userName(h.decidedBy) }} 于 {{ formatDate(h.decidedAt) }} 处理</span>
+          <span v-if="h.note" class="dim">交接说明：“{{ h.note }}”</span>
         </div>
 
-        <p v-if="h.note" class="note">交接说明：“{{ h.note }}”</p>
-        <p v-if="h.decideNote" class="dnote">处理备注：“{{ h.decideNote }}”</p>
-        <p v-if="h.status === HANDOVER.FAILED && h.failReason" class="fail">⚠ {{ h.failReason }}</p>
-
-        <!-- 接任者确认 / 谢绝 -->
-        <div v-if="canConfirmHandover(h, auth.user?.id)" class="decide-box">
-          <input v-model="noteMap[h.id]" class="note-in" placeholder="备注（可选，谢绝时将写入交接记录）" />
+        <!-- 批量操作：接任者全部确认 / 管理员按确认结果分批批准 -->
+        <div v-if="myPending(h).length || canDecideHandover(h, auth.user?.id, auth.user?.role)" class="decide-box">
+          <input v-model="noteMap[h.id]" class="note-in" placeholder="备注（可选，谢绝/审批时写入交接记录）" />
           <div class="decide-actions">
-            <button class="btn sm" :disabled="busyId === h.id" @click="decline(h)">✕ 谢绝</button>
-            <button class="btn sm ok-solid" :disabled="busyId === h.id" @click="confirm(h)">✓ 确认接收</button>
-          </div>
-        </div>
-
-        <!-- 管理员批准 / 驳回 -->
-        <div v-if="canDecideHandover(h, auth.user?.id, auth.user?.role)" class="decide-box">
-          <input v-model="noteMap[h.id]" class="note-in" placeholder="审批备注（可选，将写入交接记录）" />
-          <div class="decide-actions">
-            <button class="btn sm" :disabled="busyId === h.id" @click="decide(h, 'reject')">✕ 驳回</button>
-            <button class="btn sm ok-solid" :disabled="busyId === h.id" @click="decide(h, 'approve')">✓ 批准并执行转移</button>
+            <button v-if="myPending(h).length > 1" class="btn sm ok-solid" :disabled="busyId === h.id" @click="confirm(h, myPending(h).map((i) => i.docId))">
+              ✓ 全部确认接收（{{ myPending(h).length }} 篇）
+            </button>
+            <button
+              v-if="canDecideHandover(h, auth.user?.id, auth.user?.role)"
+              class="btn sm ok-solid"
+              :disabled="busyId === h.id"
+              @click="decide(h, confirmedItems(h).map((i) => i.docId), 'approve')"
+            >
+              ✓ 批准全部已确认（{{ confirmedItems(h).length }} 篇）
+            </button>
           </div>
         </div>
 
@@ -324,12 +389,13 @@ onMounted(async () => {
 .c-title { font-weight: 700; font-size: 14px; }
 .c-hint { color: var(--text-3); font-size: 12px; margin: 6px 0 12px; }
 .c-empty { color: var(--text-3); font-size: 13px; padding: 12px 0; }
-.doc-pick { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+.doc-pick { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
 .dp { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
 .dp:hover { background: var(--primary-weak); }
 .dp.disabled { opacity: 0.55; cursor: not-allowed; }
 .dp-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dp-tag { font-size: 11px; color: #b45309; background: #fef3c7; border-radius: 999px; padding: 1px 8px; }
+.dp-sel { border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px; font-size: 12px; background: #fff; max-width: 180px; }
 .c-form { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 12px; }
 .f-item { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
 .f-k { color: var(--text-2); }
@@ -343,12 +409,13 @@ onMounted(async () => {
 .ho { padding: 16px 20px; }
 .ho-top { display: flex; justify-content: space-between; gap: 14px; }
 .ho-main { min-width: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.ho-users { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; font-size: 15px; }
+.ho-users { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; font-size: 15px; flex-wrap: wrap; }
 .ho-users .arrow { color: var(--text-3); font-weight: 400; }
+.ho-succ { display: inline-flex; align-items: center; gap: 4px; }
 .ava { width: 22px; height: 22px; border-radius: 50%; color: #fff; font-size: 10px; display: inline-grid; place-items: center; }
 .ho-count { font-size: 12px; color: var(--primary); background: var(--primary-weak); border-radius: 999px; padding: 1px 9px; }
 .ho-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; white-space: nowrap; }
-.st { font-size: 12px; padding: 2px 10px; border-radius: 999px; }
+.st { font-size: 12px; padding: 2px 10px; border-radius: 999px; white-space: nowrap; }
 .st-pending { background: #fef3c7; color: #b45309; }
 .st-wait { background: var(--primary-weak); color: var(--primary); }
 .st-ok { background: #dcfce7; color: #15803d; }
@@ -359,16 +426,17 @@ onMounted(async () => {
 
 .ho-docs { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
 .hd { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; background: var(--panel-2); }
-.hd-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.hd-title { font-weight: 600; font-size: 13px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hd-line { display: flex; align-items: center; gap: 10px; }
+.hd-title { font-weight: 600; font-size: 13px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 .hd-title:hover { color: var(--primary); }
+.hd-to { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-2); white-space: nowrap; }
 .hd-result { margin-top: 4px; font-size: 12px; color: #15803d; }
+.hd-fail { margin-top: 4px; font-size: 12px; color: #b91c1c; }
+.hd-note { margin-top: 4px; font-size: 12px; color: var(--text-3); }
+.hd-acts { margin-top: 8px; display: flex; justify-content: flex-end; gap: 8px; }
 
 .ho-info { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 12px; font-size: 13px; }
 .dim { color: var(--text-3); font-size: 12px; }
-.note { margin: 8px 0 0; font-size: 13px; color: var(--text-2); }
-.dnote { margin: 6px 0 0; font-size: 13px; color: var(--text-2); background: var(--panel-2); border-radius: 8px; padding: 8px 12px; }
-.fail { margin: 8px 0 0; font-size: 13px; color: #b91c1c; background: #fee2e2; border-radius: 8px; padding: 8px 12px; }
 
 .decide-box { margin-top: 12px; border-top: 1px dashed var(--border); padding-top: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .note-in { flex: 1; min-width: 200px; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 13px; outline: none; }

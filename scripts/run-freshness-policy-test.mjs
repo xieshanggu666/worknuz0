@@ -219,10 +219,10 @@ const snap = handoverSnapshotOf(await getDoc(dH.id))
 r = await freshness.setCategoryPolicy('c-b', 180, admin)
 assert(r.status === 'ok' && r.applied >= 1, '策略调整重算继承文档')
 const failures = checkHandoverConflicts(
-  { items: [{ docId: dH.id, title: dH.title, snapshot: snap }] },
+  [{ docId: dH.id, title: dH.title, snapshot: snap }],
   { [dH.id]: await getDoc(dH.id) }
 )
-assert(failures.length === 1 && failures[0].fields.includes('保鲜配置已变化'), '交接期间策略重算被识别为并发变更（整体回退保护）')
+assert(failures.length === 1 && failures[0].fields.includes('保鲜配置已变化'), '交接期间策略重算被识别为并发变更（该篇回退保护）')
 
 // ---------- 9. 已有逐篇配置迁移（v9） ----------
 console.log('\n[9] 迁移：历史逐篇配置标记为文档级覆盖，复核单补规则快照')

@@ -5,7 +5,7 @@ import { uid } from '@/utils/format'
 import { buildTimelineEntry } from '@/utils/review'
 import { RETIRE, isRetirementOpen, isRetirementActive } from '@/utils/retirement'
 import { GAP } from '@/utils/gap'
-import { isHandoverOpen } from '@/utils/handover'
+import { isItemOpen } from '@/utils/handover'
 import { GUEST_ID, isGuestUser, ROLE } from '@/utils/permission'
 import { useKbStore } from './kb'
 
@@ -104,8 +104,8 @@ export const useRetirementStore = defineStore('retirement', () => {
         .filter((rv) => rv.status === 'pending').first()
       if (pendingReview) { result = { status: 'in-review', title: doc.title }; return }
 
-      // 交接中的文档先完成/取消交接，避免所有权与退役责任交错
-      const handover = await db.handovers.filter((h) => isHandoverOpen(h) && (h.docIds || []).includes(docId)).first()
+      // 交接中的文档先完成/取消交接，避免所有权与退役责任交错（按篇判定：该篇仍在流转才占用）
+      const handover = await db.handovers.filter((h) => (h.items || []).some((i) => i.docId === docId && isItemOpen(i))).first()
       if (handover) { result = { status: 'in-handover', title: doc.title }; return }
 
       const retirement = {
@@ -210,7 +210,7 @@ export const useRetirementStore = defineStore('retirement', () => {
           .where('docId').equals(doc.id)
           .filter((rv) => rv.status === 'pending').first()
         if (pendingReview) { result = { status: 'in-review', title: doc.title }; return }
-        const handover = await db.handovers.filter((h) => isHandoverOpen(h) && (h.docIds || []).includes(doc.id)).first()
+        const handover = await db.handovers.filter((h) => (h.items || []).some((i) => i.docId === doc.id && isItemOpen(i))).first()
         if (handover) { result = { status: 'in-handover', title: doc.title }; return }
 
         // ① 共享链接：撤销旧文档全部「有效」链接（未过期、未撤销），保留记录与撤销时间，撤销退役时可恢复
